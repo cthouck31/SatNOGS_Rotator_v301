@@ -4,10 +4,16 @@
 #include "Easycomm.h"
 #include "Endstop.h"
 #include "Rotator_Pins.h"
+#include "Crc.h"
 
 // Status Indicators.
 #define GLED  (12)
 #define RLED  (13)
+
+
+// Version string.
+static const char*
+ROTATOR_VERSION = "SatNOGS-v3.0.1-Stepper-r0.0.1";
 
 // Easycomm Controller.
 #define SERIAL_BAUD_RATE  (115200)
@@ -25,6 +31,7 @@ Easycomm_Ctrl comms;
 #define MAX_AZIM_ANGLE    (180)
 #define MIN_ELEV_ANGLE    (0)
 #define MAX_ELEV_ANGLE    (360)
+#define BREAKIN_STEP      (45)
 // Map pins from 'Rotator_Pins.h'.
 #define STEPPER_ENABLE    (MOTOR_EN)
 #define AZIM_MOTOR_PIN1   (M1IN1)
@@ -64,7 +71,40 @@ int8_t Rotator_setMoveDown(void *dev);
 int8_t Rotator_setMoveLeft(void *dev);
 int8_t Rotator_setMoveRight(void *dev);
 int8_t Rotator_setBreakIn(void *dev, uint32_t msec, uint8_t fwd);
+int8_t Rotator_setZero(void *dev);
 int8_t Rotator_setPark(void *dev);
+int8_t Rotator_getVersion(void *dev, const char **vers);
+
+//=====================================================================
+// Rotator State Machine.
+//=====================================================================
+typedef struct Rotator_State
+{
+  /** @brief Current state. */
+  Easycomm_Status state;
+  
+  /** @brief Set azimuth and elevation. */
+  float azim;
+  float elev;
+  
+  /** @brief Homing flags. */
+  uint8_t isAzimHome;
+  uint8_t isElevHome;
+  
+  /** @brief Break-in state. */
+  uint32_t breakinStart;
+  uint32_t breakinTimeout;
+  uint8_t  breakinDir;
+  
+  /** @brief Error handling. */
+  Easycomm_Error error;
+  /** @brief Timeout before error returns to park (in seconds). */
+  uint32_t errorTimeout;
+  
+} Rotator_State;
+
+Rotator_State rotator;
+
 
 void
 setup()
@@ -120,7 +160,9 @@ setup()
   comms.setMoveLeft     = Rotator_setMoveLeft;
   comms.setMoveRight    = Rotator_setMoveRight;
   comms.setBreakIn      = Rotator_setBreakIn;
+  comms.setZero         = Rotator_setZero;
   comms.setPark         = Rotator_setPark;
+  comms.getVersion      = Rotator_getVersion;
   
   // Initialize rotator steppers.
   azimMotor.setEnablePin(STEPPER_ENABLE);
@@ -137,6 +179,14 @@ setup()
     blinkLed(RLED, 3, 1000);
   }
   
+  // Initialize rotator state machine.
+  memset(&rotator, 0, sizeof(rotator));
+  rotator.state        = EASYCOMM_STATUS_IDLE;
+  rotator.error        = EASYCOMM_ERROR_NONE;
+  rotator.errorTimeout = 3; // seconds.
+  rotator.isAzimHome   = 0;
+  rotator.isElevHome   = 0;
+  
   // Park at start up.
   err = Rotator_setPark(NULL);
   if (err != 0)
@@ -152,11 +202,112 @@ setup()
 void
 loop()
 {
-  uint8_t value;
-  Easycomm_run(&comms);
+  int8_t err;
+  uint8_t azimEnd, elevEnd;
   
-  // TODO: Put motor stepping in this loop to prevent blocking and
-  // enable continuous tracking.
+  Easycomm_run(&comms);
+
+  switch (rotator.state)
+  {
+    case EASYCOMM_STATUS_MOVING:
+      {
+        // Read end-stops.
+        azimEnd = Endstop_read(&azimSwitch);
+        // Check if azimuth end-stop has been reached.
+        rotator.isAzimHome = azimEnd;
+        if (rotator.isAzimHome)
+        {
+          // Set the park azimuth.
+          rotator.azim = phaseWrap(step2degree(azimMotor.currentPosition()));
+          azimMotor.moveTo(azimMotor.currentPosition());
+          rotator.state = EASYCOMM_STATUS_IDLE;
+        }
+      }
+      // No break.
+      
+    case EASYCOMM_STATUS_IDLE:
+      {
+      }
+      // No break.
+      
+    case EASYCOMM_STATUS_POINTING:
+      {
+        digitalWrite(GLED, HIGH);
+        
+        // Run the motors.
+        azimMotor.moveTo(deg2step(rotator.azim));
+        azimMotor.run();
+        
+        // Position has been reached.
+        if (azimMotor.distanceToGo() == 0)
+        {
+          // Set home position if parked successfully.
+          if (rotator.state == EASYCOMM_STATUS_MOVING)
+          {
+            // Store home position.
+            azimMotor.setCurrentPosition(0);
+          }
+          rotator.state = EASYCOMM_STATUS_IDLE;
+          digitalWrite(RLED, LOW);
+        }
+        else
+        {
+          digitalWrite(RLED, HIGH);
+        }
+      }
+      break;
+      
+    case EASYCOMM_STATUS_BREAKIN:
+      {
+        // Run the motors.
+        if (rotator.breakinDir)
+        {
+          azimMotor.move(deg2step(BREAKIN_STEP));
+        }
+        else
+        {
+          azimMotor.move(deg2step(-BREAKIN_STEP));
+        }
+        azimMotor.run();
+        
+        // Position has been reached.
+        if (((uint32_t)millis() - rotator.breakinStart) > rotator.breakinTimeout)
+        {
+          // Park the rotator.
+          rotator.state = EASYCOMM_STATUS_MOVING;
+        }
+      }
+      break;
+      
+    default:
+      // TODO: Send alarm back to host.
+      // Easycomm_sendAlarm(String((uint16_t)rotator.error));
+      
+    case EASYCOMM_STATUS_ERROR:
+      {
+        // Set error indicator.
+
+        // Sleep for a bit.
+        delay((uint32_t)rotator.errorTimeout*1000);
+        // Attempt to park (sets state to MOVING).
+        err = Rotator_setPark(NULL);
+        if (err != 0)
+        {
+          // Blink error indicator.
+          blinkLed(RLED, 1000, 10);
+          // TODO: Send alarm back to host.
+          // Easycomm_sendAlarm(String((uint16_t)rotator.error));
+        }
+        else
+        {
+          digitalWrite(RLED, LOW);
+        }
+        
+      }
+      break;
+  }
+
+
 };
 
 
@@ -236,24 +387,8 @@ int8_t
 Rotator_setAzim(void *dev,
                 float azim)
 {
-  uint32_t steps = 0;
-  uint32_t time;
-  float phase = phaseWrap(azim);
-  int32_t pos = deg2step(phase);
-  
-  azimMotor.moveTo(pos);
-  
-  while (azimMotor.currentPosition() != pos)
-  {
-    azimMotor.run();
-    steps++;
-  }
-  
-  time = millis();
-  while (((millis() - time) < HOMING_DELAY) && steps)
-  {
-    azimMotor.run();
-  }
+  rotator.azim  = phaseWrap(azim);
+  rotator.state = EASYCOMM_STATUS_POINTING;
   
   return 0;
 };
@@ -278,7 +413,7 @@ int8_t
 Rotator_getUplinkFreq(void *dev,
                       float *freq)
 {
-  *freq = 144000;
+  *freq = 0;
   
   return 0;
 };
@@ -294,7 +429,7 @@ int8_t
 Rotator_getDownlinkFreq(void *dev,
                       float *freq)
 {
-  *freq = 145000;
+  *freq = 0;
   
   return 0;
 };
@@ -311,34 +446,10 @@ Rotator_setBreakIn(void *dev,
                    uint32_t msec,
                    uint8_t fwd)
 {
-  uint32_t start;
-  
-  digitalWrite(RLED, HIGH);
-  
-  start = millis();
-  while ((((uint32_t)millis()) - start) < msec)
-  {
-    if (fwd)
-    {
-      azimMotor.moveTo(azimMotor.currentPosition()+STEPS_PER_REV*4);
-    }
-    else
-    {
-      azimMotor.moveTo(azimMotor.currentPosition()-STEPS_PER_REV*4);
-    }
-    azimMotor.run();
-  }
-  
-  // Home has been found, break out of loop.
-  azimMotor.moveTo(azimMotor.currentPosition());
-  
-  start = millis();
-  while ((((uint32_t)millis()) - start) < HOMING_DELAY)
-  {
-    azimMotor.run();
-  }
-  
-  digitalWrite(RLED, LOW);
+  rotator.breakinDir     = fwd;
+  rotator.breakinTimeout = msec;
+  rotator.breakinStart   = millis();
+  rotator.state          = EASYCOMM_STATUS_BREAKIN;
   
   return 0;
 };
@@ -358,20 +469,20 @@ Rotator_setMoveDown(void *dev)
 int8_t
 Rotator_setMoveLeft(void *dev)
 {
-  uint8_t value;
   float currDeg = step2deg(azimMotor.currentPosition());
   float nextDeg = currDeg - 0.5f;
   nextDeg       = phaseWrap(nextDeg);
-  int32_t pos   = deg2step(nextDeg);
   
-  azimMotor.moveTo(pos);
-  
-  while (azimMotor.currentPosition() != pos)
+  switch(rotator.state)
   {
-    value = Endstop_read(&azimSwitch);
-    digitalWrite(RLED, value);
-    azimMotor.run();
+    case EASYCOMM_STATUS_IDLE:
+      break;
+      
+    default:
+      return -1;
   }
+  
+  rotator.azim  = nextDeg;
   
   return 0;
 };
@@ -379,20 +490,29 @@ Rotator_setMoveLeft(void *dev)
 int8_t
 Rotator_setMoveRight(void *dev)
 {
-  uint8_t value;
   float currDeg = step2deg(azimMotor.currentPosition());
   float nextDeg = currDeg + 0.5f;
   nextDeg       = phaseWrap(nextDeg);
-  int32_t pos   = deg2step(nextDeg);
   
-  azimMotor.moveTo(pos);
-  
-  while (azimMotor.currentPosition() != pos)
+  switch(rotator.state)
   {
-    value = Endstop_read(&azimSwitch);
-    digitalWrite(RLED, value);
-    azimMotor.run();
+    case EASYCOMM_STATUS_IDLE:
+      break;
+      
+    default:
+      return -1;
   }
+  
+  rotator.azim  = nextDeg;
+  
+  return 0;
+};
+
+int8_t
+Rotator_setZero(void *dev)
+{
+  // Store home position.
+  azimMotor.setCurrentPosition(0);
   
   return 0;
 };
@@ -400,42 +520,19 @@ Rotator_setMoveRight(void *dev)
 int8_t
 Rotator_setPark(void *dev)
 {
-  uint32_t steps = 0;
-  uint32_t time;
-  uint8_t value;
-  uint8_t isAzimHome = 0;
-  float currDeg = step2deg(azimMotor.currentPosition());
-  // 4 revolutions.
-  int32_t pos   = deg2step(currDeg+4*360);
+  // Request 4 rotations.
+  rotator.azim = deg2step(step2deg(azimMotor.currentPosition()) + 4*360.0f);
+  // Go to MOVING state.
+  rotator.state = EASYCOMM_STATUS_MOVING;
   
-  azimMotor.moveTo(pos);
+  return 0;
+};
 
-  Easycomm_writePacket(&comms, float2String(currDeg, 3));  
-  Easycomm_writePacket(&comms, String(pos));
-  
-  while (!isAzimHome)
-  {
-    value = Endstop_read(&azimSwitch);
-    digitalWrite(RLED, value);
-    if (value && !isAzimHome)
-    {
-      azimMotor.moveTo(azimMotor.currentPosition());
-      isAzimHome = 1;
-      break;
-    }
-    azimMotor.run();
-    steps++;
-  }
-  
-  time = millis();
-  while (((millis() - time) < HOMING_DELAY) && steps)
-  {
-    azimMotor.run();
-  }
-  
-  digitalWrite(RLED, LOW);
-  
-  azimMotor.setCurrentPosition(0);
+int8_t
+Rotator_getVersion(void *dev,
+                   const char **vers)
+{
+  *vers = ROTATOR_VERSION;
   
   return 0;
 };

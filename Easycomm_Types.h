@@ -4,12 +4,12 @@
 // Numerical representation of EasyComm III commands.
 typedef enum Easycomm_Cmd_Defs
 {
-    // EasyComm I.
+    // EasyComm I   (4 commands).
     EASYCOMM_AZ =  0, 
     EASYCOMM_EL =  1,
     EASYCOMM_UP =  2,
     EASYCOMM_DN =  3,
-    // EasyComm II.
+    // EasyComm II  (17 commands).
     EASYCOMM_DM =  4,
     EASYCOMM_UM =  5,
     EASYCOMM_DR =  6,
@@ -27,7 +27,7 @@ typedef enum Easycomm_Cmd_Defs
     EASYCOMM_AN = 18,
     EASYCOMM_ST = 19,
     EASYCOMM_VE = 20,
-    // EasyComm III.
+    // EasyComm III (8 commands).
     EASYCOMM_VL = 21, 
     EASYCOMM_VR = 22,
     EASYCOMM_VU = 23,
@@ -36,8 +36,13 @@ typedef enum Easycomm_Cmd_Defs
     EASYCOMM_CW = 26,
     EASYCOMM_GS = 27,
     EASYCOMM_GE = 28,
+    // Custom (5 commands).
     EASYCOMM_PARK = 29,
     EASYCOMM_RESET = 30,
+    EASYCOMM_REBOOT = 31,
+    EASYCOMM_ZERO = 32,
+    EASYCOMM_BREAKIN = 33,
+    
     EASYCOMM_NUM_CMDS
 
 } Easycomm_Cmd_Defs;
@@ -78,10 +83,11 @@ const char* Easycomm_Cmds[] =
     "CW",
     "GS",
     "GE",
-    // Custom (4 commands).
+    // Custom (5 commands).
     "PARK",
     "RESET",
-    "REBOOT",
+    "RBOOT",
+    "ZERO",
     "BREAKIN"
 };
 
@@ -91,13 +97,16 @@ typedef enum Easycomm_Status
     EASYCOMM_STATUS_IDLE     = 0x01,
     EASYCOMM_STATUS_MOVING   = 0x02,
     EASYCOMM_STATUS_POINTING = 0x04,
-    EASYCOMM_STATUS_ERROR    = 0x08
+    EASYCOMM_STATUS_ERROR    = 0x08,
+    // Custom.
+    EASYCOMM_STATUS_BREAKIN  = 0x10
 
 } Easycomm_Status;
 
 // Easycomm errors.
 typedef enum Easycomm_Error
 {
+    EASYCOMM_ERROR_NONE   = 0x00,
     EASYCOMM_ERROR_SENSOR = 0x01,
     EASYCOMM_ERROR_JAM    = 0x02,
     EASYCOMM_ERROR_HOMING = 0x04

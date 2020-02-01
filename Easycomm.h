@@ -11,8 +11,13 @@
 // Easycomm Types.
 #include "Easycomm_Types.h"
 
+// CRC.
+#include "Crc.h"
+
 // Easycomm definitions.
 #define EASYCOMM_VERSION    (0x03)
+
+static uint16_t Easycomm_Hash_Table[EASYCOMM_NUM_CMDS];
 
 // Easycomm Class.
 typedef struct Easycomm_Ctrl
@@ -58,9 +63,11 @@ typedef struct Easycomm_Ctrl
         int8_t (*setMoveDown)(void *dev);
         int8_t (*setMoveLeft)(void *dev);
         int8_t (*setMoveRight)(void *dev);
+        int8_t (*setZero)(void *dev);
         int8_t (*setPark)(void *dev);
         
         int8_t (*setBreakIn)(void *dev, uint32_t msec, uint8_t fwd);
+        int8_t (*getVersion)(void *dev, const char **vers);
 
 } Easycomm_Ctrl;
 
@@ -74,6 +81,9 @@ typedef struct Easycomm_Ctrl
 int8_t
 Easycomm_init(Easycomm_Ctrl *ctrl)
 {
+  uint16_t hash;
+  uint16_t k;
+  uint16_t len;
   if (ctrl == NULL)
   {
     return -1;
@@ -81,6 +91,21 @@ Easycomm_init(Easycomm_Ctrl *ctrl)
 
   // Reset memory.
   memset(ctrl, 0, sizeof(Easycomm_Ctrl));
+  
+  // Initialize CRC.
+  Crc_init();
+  
+  // Compute CRC hash table.
+  memset(Easycomm_Hash_Table, 0, sizeof(Easycomm_Hash_Table));
+  for (k = 0; k < EASYCOMM_NUM_CMDS; k++)
+  {
+    // Compute hash.
+    len  = strnlen(Easycomm_Cmds[k], 32);
+    len  = len > 2 ? 2 : len;
+    hash = Crc_process((uint8_t*)Easycomm_Cmds[k], len);
+    // Store in hash table for fast look-up (index equals 'enum' of command).
+    Easycomm_Hash_Table[k] = hash;
+  }
 
   return 0;
 };
@@ -241,47 +266,6 @@ Easycomm_blinkFailLed(Easycomm_Ctrl *ctrl,
 };
 
 /*
-  @brief Find and replace a substring in a string.
-  
-  @param[in] s  String to be searched.
-  @param[in] loc  Substring to locate and replace.
-  @param[in] rep  Substring to replace with if found.
-  
-  @return String with replaced substring (if found), otherwise the input string.
-*/
-String
-findAndReplace(String *s,
-               const char *loc,
-               const char *rep)
-{
-  String repStr;
-  String locStr;
-  String newStr;
-  int16_t idx;
-  
-  locStr = String(loc);
-  
-  idx = s->indexOf(locStr);
-  if (idx < 0)
-  {
-    return (*s);
-  }
-  
-  repStr = String(rep);
-  
-  if (idx == 0)
-  {
-    newStr = repStr + s->substring(idx+locStr.length());
-  }
-  else
-  {
-    newStr = s->substring(0, idx) + repStr + s->substring(idx+locStr.length());
-  }
-
-  return newStr;
-};
-
-/*
   @brief Convenience function to convert a float to a string.
   
   @param[in] x      Float number.
@@ -298,7 +282,7 @@ float2String(const float x,
   int32_t fracInt;
   String number;
   
-  int32_t whole = x - (((int32_t)x)-x);
+  int32_t whole = (int32_t)x;
   
   frac = x - whole;
   for (k = 0; k < decPts; k++)
@@ -312,72 +296,65 @@ float2String(const float x,
   return number;
 };
 
-/*
-*/
-String
-parseToken(String *s,
-           const char *loc)
+uint8_t
+parseAllTokens(char** tokens,
+               const uint8_t maxNumTokens,
+               const char* line)
 {
-  String parseStr;
-  String locStr;
-  int16_t idx;
-  
-  locStr = String(loc);
-  
-  // Locate substring.
-  idx = s->indexOf(String(loc));
-  if (idx < 0)
-  {
-    return String("");
-  }
+  uint8_t k;
+  uint8_t numTokens = 0;
+  char *token;
+  char buffer[256];
+  strncpy(buffer, line,  sizeof(buffer));
 
-  // Find next whitespace.
-  idx = parseStr.indexOf(' ');
-  if (idx < 0)
+  token = strtok(buffer, " ");
+  while (token != NULL)
   {
-    return *s;
-  }
+    if (numTokens == maxNumTokens)
+    {
+      break;
+    }
+    tokens[numTokens++] = token;
+    token = strtok(NULL, " ");
+  }  
 
-  // Return value between the substring and the next whitespace.
-  return s->substring(idx, idx+locStr.length());
+  return numTokens;
 };
 
-/*
-*/
-String
-parseValue(String *s,
-           const char *loc)
+int16_t
+getEasycommCmd(uint16_t cmdHash)
 {
-  String parseStr;
-  String locStr;
-  int16_t idx;
+  uint16_t id;
+  uint8_t  found = 0;
   
-  locStr = String(loc);
-  
-  // Locate substring.
-  idx = s->indexOf(String(loc));
-  if (idx < 0)
+  for (id = 0; id < EASYCOMM_NUM_CMDS; id++)
   {
-    return String("");
-  }
-  
-  // Remove substring.
-  parseStr = s->substring(idx+locStr.length());
-  // Find next whitespace.
-  idx = parseStr.indexOf(' ');
-  if (idx < 0)
-  {
-    // Check if there is a substring leftover.
-    if (parseStr.length() > 0)
+    if (Easycomm_Hash_Table[id] == cmdHash)
     {
-      return parseStr;
+      found = 1;
+      break;
     }
-    // No value.
-    return String("");
   }
+  
+  return (found ? (int16_t)id : -1);
+};
 
-  // Return value between the substring and the next whitespace.
-  return parseStr.substring(0, idx-1);
+const char*
+getEasycommValue(uint8_t cmd,
+                 const char *token)
+{
+  uint16_t len;
+  uint16_t cmdLen;
+  
+  if (cmd > EASYCOMM_NUM_CMDS)
+  {
+    return 0;
+  }
+  
+  cmdLen = strnlen(Easycomm_Cmds[cmd], 128);
+  len    = strnlen(token, 128);
+  
+  return (len > cmdLen) ? (token+cmdLen) : NULL;
 };
 
 int8_t
@@ -385,14 +362,23 @@ Easycomm_runWait(Easycomm_Ctrl *ctrl,
                  const uint32_t msec)
 {
   char c;
-  char buffer[16];
   String packet;
-  String token, value;
   int32_t idx;
   uint16_t k;
   int8_t result;
   int32_t param;
   
+  const uint8_t MAX_NUM_TOKENS = 64;
+  uint8_t numTokens = 0;
+  char* tokens [MAX_NUM_TOKENS];
+  
+  uint16_t   len;
+  uint16_t   hash;
+  int16_t    cmd;
+  const char *valPtr;
+  
+  float data;
+    
   // Get starting time.
   uint32_t start = millis();
   
@@ -420,355 +406,255 @@ Easycomm_runWait(Easycomm_Ctrl *ctrl,
       // Indicate a packet was received.
       Easycomm_blinkPassLed(ctrl, 1, 10);
       
-      Easycomm_writePacket(ctrl, ctrl->cmdMsg);
+      //=====================================================
+      // Parse all tokens.
       
-      //=====================================================
-      // Azimuth/Elevation call.
-      if (ctrl->cmdMsg.startsWith("AZ EL"))
-      {
-        // Get the parameters.
-        result = -1;
-        if (ctrl->getAzimElev)
-        {
-          result = ctrl->getAzimElev(ctrl->dev, &ctrl->azimuth, &ctrl->elevation);
-        }
-        // Return information to host.
-        if (result == 0)
-        {
-          packet = String("AZ") + float2String(ctrl->azimuth, 1) + String(" ") + String("EL") + float2String(ctrl->elevation, 1);
-          Easycomm_writePacket(ctrl, packet);
-        }
-        // Remove tokens from the string.
-        ctrl->cmdMsg = findAndReplace(&ctrl->cmdMsg, "AZ EL", "");
-      }
-      else
-      {
-        //=====================================================
-        // Azimuth call.
-        if ((idx=ctrl->cmdMsg.indexOf("AZ")) >= 0)
-        {
-          // Check the command for a parameter.
-          token = parseToken(&ctrl->cmdMsg, "AZ");
-          value = parseValue(&token, "AZ");
-          
-          // Get the parameters.
-          result = -1;
-          
-          // Check for read or write.
-          if (value.length() == 0)
-          {
-            // Read.
-            if (ctrl->getAzim)
-            {
-              result = ctrl->getAzim(ctrl->dev, &ctrl->azimuth);
-            }
-            // Return information to host.
-            if (result == 0)
-            {
-              packet = String("AZ") + float2String(ctrl->azimuth, 1);
-              Easycomm_writePacket(ctrl, packet);
-            }
-            // Remove tokens from the string.
-            ctrl->cmdMsg = findAndReplace(&ctrl->cmdMsg, "AZ", "");
-          }
-          else
-          {
-            Easycomm_blinkFailLed(ctrl, 1, 100);
-            // Write.
-            if (ctrl->setAzim)
-            {
-              result = ctrl->setAzim(ctrl->dev, atof(value.c_str()));
-            }
-            // Remove tokens from the string.
-            ctrl->cmdMsg = findAndReplace(&ctrl->cmdMsg, token.c_str(), "");
-          }
-        }
-        //=====================================================
-        // Elevation call.
-        if ((idx=ctrl->cmdMsg.indexOf("EL")) >= 0)
-        {
-          // Check the command for a parameter.
-          token = parseToken(&ctrl->cmdMsg, "EL");
-          value = parseValue(&token, "EL");
-          
-          // Get the parameters.
-          result = -1;
-          
-          // Check for read or write.
-          if (value.length() == 0)
-          {
-            // Read.
-            if (ctrl->getElev)
-            {
-              result = ctrl->getElev(ctrl->dev, &ctrl->elevation);
-            }
-            // Return information to host.
-            if (result == 0)
-            {
-              packet = String("EL") + float2String(ctrl->elevation, 1);
-              Easycomm_writePacket(ctrl, packet);
-            }
-            // Remove tokens from the string.
-            ctrl->cmdMsg = findAndReplace(&ctrl->cmdMsg, "EL", "");
-          }
-          else
-          {
-            Easycomm_blinkFailLed(ctrl, 1, 100);
-            // Write.
-            if (ctrl->setElev)
-            {
-              result = ctrl->setElev(ctrl->dev, atof(value.c_str()));
-            }
-            // Remove tokens from the string.
-            ctrl->cmdMsg = findAndReplace(&ctrl->cmdMsg, token.c_str(), "");
-          }
-        }  
-      }
-      //=====================================================
-      // Uplink Frequency call.
-      if ((idx=ctrl->cmdMsg.indexOf("UP")) >= 0)
-      {
-        // Check the command for a parameter.
-        token = parseToken(&ctrl->cmdMsg, "UP");
-        value = parseValue(&token, "UP");
-        
-        // Get the parameters.
-        result = -1;
-        
-        // Check for read or write.
-        if (value.length() == 0)
-        {
-          // Read.
-          if (ctrl->getUplinkFreq)
-          {
-            result = ctrl->getUplinkFreq(ctrl->dev, &ctrl->uplinkFreq);
-          }
-          // Return information to host.
-          if (result == 0)
-          {
-            packet = String("UP") + float2String(ctrl->uplinkFreq, 1);
-            Easycomm_writePacket(ctrl, packet);
-          }
-          // Remove tokens from the string.
-          ctrl->cmdMsg = findAndReplace(&ctrl->cmdMsg, "UP", "");
-        }
-        else
-        {
-          Easycomm_blinkFailLed(ctrl, 1, 100);
-          // Write.
-          if (ctrl->setUplinkFreq)
-          {
-            result = ctrl->setUplinkFreq(ctrl->dev, atof(value.c_str()));
-          }
-          // Remove tokens from the string.
-          ctrl->cmdMsg = findAndReplace(&ctrl->cmdMsg, token.c_str(), "");
-        }
-      }
-      //=====================================================
-      // Downlink Frequency call.
-      if ((idx=ctrl->cmdMsg.indexOf("DN")) >= 0)
-      {
-        // Check the command for a parameter.
-        token = parseToken(&ctrl->cmdMsg, "DN");
-        value = parseValue(&token, "DN");
-        
-        // Get the parameters.
-        result = -1;
-        
-        // Check for read or write.
-        if (value.length() == 0)
-        {
-          // Read.
-          if (ctrl->getDownlinkFreq)
-          {
-            result = ctrl->getDownlinkFreq(ctrl->dev, &ctrl->downlinkFreq);
-          }
-          // Return information to host.
-          if (result == 0)
-          {
-            packet = String("DN") + float2String(ctrl->downlinkFreq, 1);
-            Easycomm_writePacket(ctrl, packet);
-          }
-          // Remove tokens from the string.
-          ctrl->cmdMsg = findAndReplace(&ctrl->cmdMsg, token.c_str(), "");
-        }
-        else
-        {
-          Easycomm_blinkFailLed(ctrl, 1, 100);
-          // Write.
-          if (ctrl->setDownlinkFreq)
-          {
-            result = ctrl->setDownlinkFreq(ctrl->dev, atof(value.c_str()));
-          }
-          // Remove tokens from the string.
-          ctrl->cmdMsg = findAndReplace(&ctrl->cmdMsg, token.c_str(), "");
-        }
-      }
-      //=====================================================
-      // Break-in callback.
-      if ((idx=ctrl->cmdMsg.indexOf("BREAKIN")) >= 0)
-      {
-        // Check the command for a parameter.
-        token = parseToken(&ctrl->cmdMsg, "BREAKIN");
-        value = parseValue(&token, "BREAKIN");
-        
-        // Get the parameters.
-        result = -1;
-        
-        // Check for read or write.
-        if (value.length() == 0)
-        {
-          // Use default.
-          value = String("3000");
-        }
-        
-        Easycomm_writePacket(ctrl, value);
-        
-        // Write.
-        if (ctrl->setBreakIn)
-        {
-          Easycomm_blinkFailLed(ctrl, 1, 100);
-          param = atoi(value.c_str());
-          result = ctrl->setBreakIn(ctrl->dev,
-                                    (param < 0) ? -param : param,
-                                    param >= 0);
-        }
-        else
-        {
-          Easycomm_blinkPassLed(ctrl, 1, 1000);
-        }
-        // Remove tokens from the string.
-        ctrl->cmdMsg = findAndReplace(&ctrl->cmdMsg, token.c_str(), "");
-      }
-      //=====================================================
-      // Move up callback.
-      if ((idx=ctrl->cmdMsg.indexOf("MU")) >= 0)
-      {
-        // Check the command for a parameter.
-        token = parseToken(&ctrl->cmdMsg, "MU");
-        
-        // Get the parameters.
-        result = -1;
-        
-        Easycomm_writePacket(ctrl, value);
-        
-        // Write.
-        if (ctrl->setMoveUp)
-        {
-          Easycomm_blinkFailLed(ctrl, 1, 100);
-          result = ctrl->setMoveUp(ctrl->dev);
-        }
-        else
-        {
-          Easycomm_blinkPassLed(ctrl, 1, 1000);
-        }
-        // Remove tokens from the string.
-        ctrl->cmdMsg = findAndReplace(&ctrl->cmdMsg, token.c_str(), "");
-      }
-      //=====================================================
-      // Move down callback.
-      if ((idx=ctrl->cmdMsg.indexOf("MD")) >= 0)
-      {
-        // Check the command for a parameter.
-        token = parseToken(&ctrl->cmdMsg, "MD");
-        
-        // Get the parameters.
-        result = -1;
-        
-        Easycomm_writePacket(ctrl, value);
-        
-        // Write.
-        if (ctrl->setMoveDown)
-        {
-          Easycomm_blinkFailLed(ctrl, 1, 100);
-          result = ctrl->setMoveDown(ctrl->dev);
-        }
-        else
-        {
-          Easycomm_blinkPassLed(ctrl, 1, 1000);
-        }
-        // Remove tokens from the string.
-        ctrl->cmdMsg = findAndReplace(&ctrl->cmdMsg, token.c_str(), "");
-      }
-      //=====================================================
-      // Move left callback.
-      if ((idx=ctrl->cmdMsg.indexOf("ML")) >= 0)
-      {
-        // Check the command for a parameter.
-        token = parseToken(&ctrl->cmdMsg, "ML");
-        
-        // Get the parameters.
-        result = -1;
-        
-        Easycomm_writePacket(ctrl, value);
-        
-        // Write.
-        if (ctrl->setMoveLeft)
-        {
-          Easycomm_blinkFailLed(ctrl, 1, 100);
-          result = ctrl->setMoveLeft(ctrl->dev);
-        }
-        else
-        {
-          Easycomm_blinkPassLed(ctrl, 1, 1000);
-        }
-        // Remove tokens from the string.
-        ctrl->cmdMsg = findAndReplace(&ctrl->cmdMsg, token.c_str(), "");
-      }
-      //=====================================================
-      // Move right callback.
-      if ((idx=ctrl->cmdMsg.indexOf("MR")) >= 0)
-      {
-        // Check the command for a parameter.
-        token = parseToken(&ctrl->cmdMsg, "MR");
-        
-        // Get the parameters.
-        result = -1;
-        
-        Easycomm_writePacket(ctrl, value);
-        
-        // Write.
-        if (ctrl->setMoveRight)
-        {
-          Easycomm_blinkFailLed(ctrl, 1, 100);
-          result = ctrl->setMoveRight(ctrl->dev);
-        }
-        else
-        {
-          Easycomm_blinkPassLed(ctrl, 1, 1000);
-        }
-        // Remove tokens from the string.
-        ctrl->cmdMsg = findAndReplace(&ctrl->cmdMsg, token.c_str(), "");
-      }
-      //=====================================================
-      // Park callback.
-      if ((idx=ctrl->cmdMsg.indexOf("PARK")) >= 0)
-      {
-        // Check the command for a parameter.
-        token = parseToken(&ctrl->cmdMsg, "PARK");
-        
-        // Get the parameters.
-        result = -1;
-        
-        Easycomm_writePacket(ctrl, value);
-        
-        // Write.
-        if (ctrl->setPark)
-        {
-          Easycomm_blinkFailLed(ctrl, 1, 100);
-          result = ctrl->setPark(ctrl->dev);
-        }
-        else
-        {
-          Easycomm_blinkPassLed(ctrl, 1, 1000);
-        }
-        // Remove tokens from the string.
-        ctrl->cmdMsg = findAndReplace(&ctrl->cmdMsg, token.c_str(), "");
-      }
+      // Return packet.
+      packet    = "";
+      // Number of tokens in string.
+      numTokens = parseAllTokens(tokens, MAX_NUM_TOKENS, ctrl->cmdMsg.c_str());
       
-      Easycomm_writePacket(ctrl, ctrl->cmdMsg);
-  
-      // Flush the buffer.
+      // Process all tokens.
+      for (k = 0; k < numTokens; k++)
+      {
+        // Get length of the token.
+        len = strnlen(tokens[k], 64);
+
+        // Skip short tokens.
+        if (len < 2)
+        {
+          continue;
+        }
+        // Compute hash of token.
+        hash     = Crc_process((uint8_t*)tokens[k], 2);
+        // Get the Easycomm command ID.
+        cmd      = getEasycommCmd(hash);
+        // Detect invalid command.
+        if (cmd < 0)
+        {
+          // Continue processing tokens.
+          continue;
+        }
+        
+        // Get the associated value(s).
+        valPtr = getEasycommValue(cmd, tokens[k]);
+        
+        // Process the command.
+        switch(cmd)
+        {
+
+          //==========================================================================
+          // Azimuth.
+          case EASYCOMM_AZ:
+            {
+              // Check if read/write.
+              if (valPtr != NULL)
+              {
+                // Prevent null function call.
+                if (ctrl->setAzim)
+                {
+                  ctrl->setAzim(ctrl->dev, atof(valPtr));
+                }
+              }
+              else
+              {
+                // Create return packet.
+                data = 0.0f;
+                if (ctrl->getAzim)
+                {
+                  ctrl->getAzim(ctrl->dev, &data);
+                }
+                packet = String("AZ") + String(float2String(data, 1)) + String(" ") + packet;
+              }
+            }
+            break;
+
+          //==========================================================================
+          // Elevation.
+          case EASYCOMM_EL:
+            {
+              // Check if read/write.
+              if (valPtr != NULL)
+              {
+                // Prevent null function call.
+                if (ctrl->setElev)
+                {
+                  ctrl->setElev(ctrl->dev, atof(valPtr));
+                }
+              }
+              else
+              {
+                // Create return packet.
+                data = 0.0f;
+                if (ctrl->getElev)
+                {
+                  ctrl->getElev(ctrl->dev, &data);
+                }
+                packet = packet + String("EL") + String(float2String(data, 1)) + String(" ");
+              }
+            }
+            break;
+
+          //==========================================================================
+          // Uplink Frequency.
+          case EASYCOMM_UP:
+            {
+              // Check if read/write.
+              if (valPtr != NULL)
+              {
+                // Prevent null function call.
+                if (ctrl->setUplinkFreq)
+                {
+                  ctrl->setUplinkFreq(ctrl->dev, atof(valPtr));
+                }
+              }
+              else
+              {
+                // Create return packet.
+                data = 0.0f;
+                if (ctrl->getUplinkFreq)
+                {
+                  ctrl->getUplinkFreq(ctrl->dev, &data);
+                }
+                packet = packet + String("UP") + String(float2String(data, 1)) + String(" ");
+              }
+            }
+            break;
+
+          //==========================================================================
+          // Downlink Frequency.
+          case EASYCOMM_DN:
+            {
+              // Check if read/write.
+              if (valPtr != NULL)
+              {
+                // Prevent null function call.
+                if (ctrl->setDownlinkFreq)
+                {
+                  ctrl->setDownlinkFreq(ctrl->dev, atof(valPtr));
+                }
+              }
+              else
+              {
+                // Create return packet.
+                data = 0.0f;
+                if (ctrl->getDownlinkFreq)
+                {
+                  ctrl->getDownlinkFreq(ctrl->dev, &data);
+                }
+                packet = packet + String("DN") + String(float2String(data, 1)) + String(" ");
+              }
+            }
+            break;
+            
+          //==========================================================================
+          // Move up.
+          case EASYCOMM_MU:
+            {
+              // Prevent null function call.
+              if (ctrl->setMoveUp)
+              {
+                ctrl->setMoveUp(ctrl->dev);
+              }
+            }
+            break;
+            
+          //==========================================================================
+          // Move down.
+          case EASYCOMM_MD:
+            {
+              // Prevent null function call.
+              if (ctrl->setMoveDown)
+              {
+                ctrl->setMoveDown(ctrl->dev);
+              }
+            }
+            break;
+            
+          //==========================================================================
+          // Move right.
+          case EASYCOMM_MR:
+            {
+              // Prevent null function call.
+              if (ctrl->setMoveRight)
+              {
+                ctrl->setMoveRight(ctrl->dev);
+              }
+            }
+            break;
+            
+          //==========================================================================
+          // Move left.
+          case EASYCOMM_ML:
+            {
+              // Prevent null function call.
+              if (ctrl->setMoveLeft)
+              {
+                ctrl->setMoveLeft(ctrl->dev);
+              }
+            }
+            break;
+            
+          //==========================================================================
+          // Version.
+          case EASYCOMM_VE:
+            {
+              // Prevent null function call.
+              if (ctrl->getVersion)
+              {
+                ctrl->getVersion(ctrl->dev, &valPtr);
+              }
+              packet = packet + String(valPtr);
+            }
+            break;
+            
+          //==========================================================================
+          // Break-in.
+          case EASYCOMM_BREAKIN:
+            {
+              data = 3000;
+              if (valPtr != NULL)
+              {
+                data = atoi(valPtr);
+              }
+              // Prevent null function call.
+              if (ctrl->setBreakIn)
+              {
+                ctrl->setBreakIn(ctrl->dev, data > 0 ? data : -data, data > 0);
+              }
+            }
+            break;
+            
+          //==========================================================================
+          // Park.
+          case EASYCOMM_PARK:
+            {
+              // Prevent null function call.
+              if (ctrl->setPark)
+              {
+                ctrl->setPark(ctrl->dev);
+              }
+            }
+            break;
+
+          //==========================================================================
+          // Invalid.
+          default:
+            // Invalid token detected.
+            break;
+
+        } // end switch.
+        
+      } // end token parsing.
+
+
+      // Print return packet (if populated).
+      if (packet.length())
+      {
+        Easycomm_writePacket(ctrl, packet);
+      }
+
+      // Flush the command.
       ctrl->cmdMsg = "";
       Serial.flush();
     }
