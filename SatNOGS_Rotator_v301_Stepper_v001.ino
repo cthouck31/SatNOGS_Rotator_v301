@@ -4,8 +4,6 @@
 #include "Easycomm.h"
 #include "Endstop.h"
 #include "Rotator_Pins.h"
-#include "Crc.h"
-#include "Critical_Section.h"
 
 // Status Indicators.
 #define GLED  (12)
@@ -50,9 +48,6 @@ AccelStepper azimMotor(0x1, AZIM_MOTOR_PIN1, AZIM_MOTOR_PIN2);
 Endstop azimSwitch;
 // Endstop elevSwitch;
 
-// Critical section lock.
-static volatile uint8_t locked = 0;
-
 //=====================================================================
 // Utility Functions.
 //=====================================================================
@@ -71,6 +66,7 @@ void blinkLed(uint16_t pin, uint16_t numBlinks, uint16_t periodMs);
 do {                                               \
       String errMsg = String("AL") + String(mask); \
       /* Get the function name and line number.*/  \
+      /* Must use define to get function/line. */  \
       errMsg += String(",");                       \
       errMsg += String(__func__);                  \
       errMsg += String("-line");                   \
@@ -205,9 +201,6 @@ setup()
   comms.setZero         = Rotator_setZero;
   comms.setPark         = Rotator_setPark;
   comms.getVersion      = Rotator_getVersion;
-
-  // Initialize critical section lock.
-  locked = 0;
 
   // Initialize rotator steppers.
   azimMotor.setEnablePin(STEPPER_ENABLE);
@@ -382,14 +375,7 @@ int8_t
 Rotator_getElev(void *dev,
                 float *elev)
 {
-  // Check if already locked.
-  if (locked)
-  {
-    return -1;
-  }
-
   *elev = 180;
-  // locked = 1;
 
   return 0;
 };

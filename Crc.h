@@ -1,6 +1,10 @@
 #ifndef __CRC_H__
 #define __CRC_H__
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef uint16_t Crc_Type_t;
 
 #define CRC_WIDTH (8 * sizeof(Crc_Type_t))
@@ -14,7 +18,7 @@ static uint8_t    Crc_Initialized = 0;
 static Crc_Type_t Crc_Table[256];
 
 
-void
+static void
 Crc_init()
 {
   uint8_t  b;
@@ -43,7 +47,7 @@ Crc_init()
   Crc_Initialized = 1;
 };
 
-Crc_Type_t
+static Crc_Type_t
 Crc_process(const uint8_t *data,
             const uint32_t len)
 {
@@ -63,5 +67,9 @@ Crc_process(const uint8_t *data,
   
   return remainder;
 };
+
+#ifdef __cplusplus
+};
+#endif
 
 #endif // __CRC_H__

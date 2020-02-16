@@ -1,6 +1,10 @@
 #ifndef EASYCOMM_TYPES_H
 #define EASYCOMM_TYPES_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // Numerical representation of EasyComm III commands.
 typedef enum Easycomm_Cmd_Defs
 {
@@ -49,7 +53,7 @@ typedef enum Easycomm_Cmd_Defs
 
 // List of EasyComm III commands.
 // Indices match the definitions.
-const char* Easycomm_Cmds[] =
+static const char* Easycomm_Cmds[] =
 {
     // EasyComm I   (4 commands).
     "AZ", 
@@ -124,5 +128,9 @@ typedef enum Easycomm_Config_Reg
     EASYCOMM_REG_UNSTICK   = 0x0d
 
 } Easycomm_Config_Reg;
+
+#ifdef __cplusplus
+}; // extern "C" {
+#endif
 
 #endif // EASYCOMM_TYPES_H
