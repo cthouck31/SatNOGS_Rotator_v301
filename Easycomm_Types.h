@@ -99,7 +99,8 @@ typedef enum Easycomm_Status
     EASYCOMM_STATUS_POINTING = 0x04,
     EASYCOMM_STATUS_ERROR    = 0x08,
     // Custom.
-    EASYCOMM_STATUS_BREAKIN  = 0x10
+    EASYCOMM_STATUS_BREAKIN  = 0x10,
+    EASYCOMM_STATUS_PARKING  = 0x20
 
 } Easycomm_Status;
 

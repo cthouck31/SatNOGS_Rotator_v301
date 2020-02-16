@@ -10,7 +10,7 @@ IP_ADDR=127.0.0.1
 PORT=4533
 
 # Serial rate of Arduino.
-SERIAL_DEV=/dev/ttyACM1
+SERIAL_DEV=/dev/ttyACM0
 SERIAL_RATE=115200
 
 # Easycomm II.

@@ -66,7 +66,7 @@ typedef struct Easycomm_Ctrl
         int8_t (*setZero)(void *dev);
         int8_t (*setPark)(void *dev);
         
-        int8_t (*setBreakIn)(void *dev, uint32_t msec, uint8_t fwd);
+        int8_t (*setBreakIn)(void *dev, uint32_t sec, uint8_t fwd);
         int8_t (*getVersion)(void *dev, const char **vers);
 
 } Easycomm_Ctrl;
@@ -612,7 +612,7 @@ Easycomm_runWait(Easycomm_Ctrl *ctrl,
           // Break-in.
           case EASYCOMM_BREAKIN:
             {
-              data = 3000;
+              data = 3;
               if (valPtr != NULL)
               {
                 data = atoi(valPtr);
