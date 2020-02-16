@@ -5,6 +5,7 @@
 #include "Endstop.h"
 #include "Rotator_Pins.h"
 #include "Crc.h"
+#include "Critical_Section.h"
 
 // Status Indicators.
 #define GLED  (12)
@@ -49,10 +50,14 @@ AccelStepper azimMotor(0x1, AZIM_MOTOR_PIN1, AZIM_MOTOR_PIN2);
 Endstop azimSwitch;
 // Endstop elevSwitch;
 
+// Critical section lock.
+static volatile uint8_t locked = 0;
+
 //=====================================================================
 // Utility Functions.
 //=====================================================================
 void blinkLed(uint16_t pin, uint16_t numBlinks, uint16_t periodMs);
+void failureTrap(uint16_t failureMask);
 
 //=====================================================================
 // Rotator Functions.
@@ -84,6 +89,7 @@ typedef struct Rotator_State
   Easycomm_Status state;
   
   /** @brief Set azimuth and elevation. */
+  uint8_t homingRequest;
   float azim;
   float elev;
   
@@ -139,7 +145,7 @@ setup()
   }
   
   // Set the Easycomm context (passed to callback functions).
-  err = Easycomm_setContext(&comms, &comms);
+  err = Easycomm_setContext(&comms, &rotator);
   if (err != 0)
   {
     blinkLed(RLED, 3, 1000);
@@ -164,6 +170,9 @@ setup()
   comms.setPark         = Rotator_setPark;
   comms.getVersion      = Rotator_getVersion;
   
+  // Initialize critical section lock.
+  locked = 0;
+  
   // Initialize rotator steppers.
   azimMotor.setEnablePin(STEPPER_ENABLE);
   azimMotor.setPinsInverted(0, 0, 1);
@@ -181,15 +190,23 @@ setup()
   
   // Initialize rotator state machine.
   memset(&rotator, 0, sizeof(rotator));
-  rotator.state        = EASYCOMM_STATUS_IDLE;
-  rotator.error        = EASYCOMM_ERROR_NONE;
-  rotator.errorTimeout = 3; // seconds.
-  rotator.isAzimHome   = 0;
-  rotator.isElevHome   = 0;
+  rotator.state         = EASYCOMM_STATUS_IDLE;
+  rotator.error         = EASYCOMM_ERROR_NONE;
+  rotator.errorTimeout  = 3; // seconds.
+  rotator.isAzimHome    = 0;
+  rotator.isElevHome    = 0;
+  rotator.homingRequest = 0;
   
   // Park at start up.
   err = Rotator_setPark(NULL);
+  // Trap on failure (prevent any further damage).
   if (err != 0)
+  {
+    failureTrap(EASYCOMM_ERROR_SENSOR | EASYCOMM_ERROR_JAM | EASYCOMM_ERROR_HOMING);
+  }
+  
+  
+  while (err != 0)
   {
     blinkLed(RLED, 3, 1000);
   }
@@ -205,108 +222,22 @@ loop()
   int8_t err;
   uint8_t azimEnd, elevEnd;
   
+  // Run the Easycomm interface.
+  // NOTE: Performs callbacks on successful reception of
+  // packets. Flags should be checked after this function
+  // to perform any requests.
   Easycomm_run(&comms);
-
-  switch (rotator.state)
+  
+  // Process a homing request.
+  if (rotator.homingRequest)
   {
-    case EASYCOMM_STATUS_MOVING:
-      {
-        // Read end-stops.
-        azimEnd = Endstop_read(&azimSwitch);
-        // Check if azimuth end-stop has been reached.
-        rotator.isAzimHome = azimEnd;
-        if (rotator.isAzimHome)
-        {
-          // Set the park azimuth.
-          rotator.azim = phaseWrap(step2degree(azimMotor.currentPosition()));
-          azimMotor.moveTo(azimMotor.currentPosition());
-          rotator.state = EASYCOMM_STATUS_IDLE;
-        }
-      }
-      // No break.
-      
-    case EASYCOMM_STATUS_IDLE:
-      {
-      }
-      // No break.
-      
-    case EASYCOMM_STATUS_POINTING:
-      {
-        digitalWrite(GLED, HIGH);
-        
-        // Run the motors.
-        azimMotor.moveTo(deg2step(rotator.azim));
-        azimMotor.run();
-        
-        // Position has been reached.
-        if (azimMotor.distanceToGo() == 0)
-        {
-          // Set home position if parked successfully.
-          if (rotator.state == EASYCOMM_STATUS_MOVING)
-          {
-            // Store home position.
-            azimMotor.setCurrentPosition(0);
-          }
-          rotator.state = EASYCOMM_STATUS_IDLE;
-          digitalWrite(RLED, LOW);
-        }
-        else
-        {
-          digitalWrite(RLED, HIGH);
-        }
-      }
-      break;
-      
-    case EASYCOMM_STATUS_BREAKIN:
-      {
-        // Run the motors.
-        if (rotator.breakinDir)
-        {
-          azimMotor.move(deg2step(BREAKIN_STEP));
-        }
-        else
-        {
-          azimMotor.move(deg2step(-BREAKIN_STEP));
-        }
-        azimMotor.run();
-        
-        // Position has been reached.
-        if (((uint32_t)millis() - rotator.breakinStart) > rotator.breakinTimeout)
-        {
-          // Park the rotator.
-          rotator.state = EASYCOMM_STATUS_MOVING;
-        }
-      }
-      break;
-      
-    default:
-      // TODO: Send alarm back to host.
-      // Easycomm_sendAlarm(String((uint16_t)rotator.error));
-      
-    case EASYCOMM_STATUS_ERROR:
-      {
-        // Set error indicator.
-
-        // Sleep for a bit.
-        delay((uint32_t)rotator.errorTimeout*1000);
-        // Attempt to park (sets state to MOVING).
-        err = Rotator_setPark(NULL);
-        if (err != 0)
-        {
-          // Blink error indicator.
-          blinkLed(RLED, 1000, 10);
-          // TODO: Send alarm back to host.
-          // Easycomm_sendAlarm(String((uint16_t)rotator.error));
-        }
-        else
-        {
-          digitalWrite(RLED, LOW);
-        }
-        
-      }
-      break;
+    err = Rotator_home(NULL);
+    if (err != 0)
+    {
+      blinkLed(RLED, 10, 1000);
+    }
   }
-
+  rotator.homingRequest = 0;
 
 };
 
@@ -358,6 +289,22 @@ phaseWrap(float x)
   return x;
 };
 
+void
+failureTrap(uint16_t failureMask)
+{
+  String failure = String("AL") + String(failureMask);
+  
+  digitalWrite(RLED, LOW);
+  while (1)
+  {
+    Easycomm_writePacket(&comms, failure);
+    digitalWrite(RLED, HIGH);
+    delay(500);
+    digitalWrite(RLED, LOW);
+    delay(500);
+  }
+};
+
 //=====================================================================
 // Rotator Functions.
 //=====================================================================
@@ -387,8 +334,15 @@ int8_t
 Rotator_setAzim(void *dev,
                 float azim)
 {
-  rotator.azim  = phaseWrap(azim);
-  rotator.state = EASYCOMM_STATUS_POINTING;
+  // Check if already locked.
+  if (locked)
+  {
+    return -1;
+  }
+  
+  rotator.azim          = phaseWrap(azim);
+  rotator.state         = EASYCOMM_STATUS_POINTING;
+  rotator.homingRequest = 1;
   
   return 0;
 };
@@ -397,7 +351,14 @@ int8_t
 Rotator_getElev(void *dev,
                 float *elev)
 {
+  // Check if already locked.
+  if (locked)
+  {
+    return -1;
+  }
+  
   *elev = 180;
+// locked = 1;
   
   return 0;
 };
@@ -406,6 +367,7 @@ int8_t
 Rotator_setElev(void *dev,
                 float elev)
 {
+  rotator.homingRequest = 1;
   return 0;
 };
 
@@ -469,6 +431,12 @@ Rotator_setMoveDown(void *dev)
 int8_t
 Rotator_setMoveLeft(void *dev)
 {
+  // Check if already locked.
+  if (locked)
+  {
+    return -1;
+  }
+  
   float currDeg = step2deg(azimMotor.currentPosition());
   float nextDeg = currDeg - 0.5f;
   nextDeg       = phaseWrap(nextDeg);
@@ -482,14 +450,21 @@ Rotator_setMoveLeft(void *dev)
       return -1;
   }
   
-  rotator.azim  = nextDeg;
+  rotator.azim = nextDeg;
+  locked       = 1;
   
   return 0;
 };
 
 int8_t
 Rotator_setMoveRight(void *dev)
-{
+{ 
+  // Check if already locked.
+  if (locked)
+  {
+    return -1;
+  }
+  
   float currDeg = step2deg(azimMotor.currentPosition());
   float nextDeg = currDeg + 0.5f;
   nextDeg       = phaseWrap(nextDeg);
@@ -503,7 +478,8 @@ Rotator_setMoveRight(void *dev)
       return -1;
   }
   
-  rotator.azim  = nextDeg;
+  rotator.azim = nextDeg;
+  locked       = 1;
   
   return 0;
 };
@@ -520,10 +496,181 @@ Rotator_setZero(void *dev)
 int8_t
 Rotator_setPark(void *dev)
 {
-  // Request 4 rotations.
-  rotator.azim = deg2step(step2deg(azimMotor.currentPosition()) + 4*360.0f);
-  // Go to MOVING state.
-  rotator.state = EASYCOMM_STATUS_MOVING;
+  // Azimuth.
+  uint8_t azimFound       = 0;
+  uint8_t azimEnd         = 0;
+  uint8_t prevAzimEnd     = 0;
+  uint32_t azimStartStep  = 0;
+  uint32_t azimStopStep   = 0;
+  uint32_t azimHomePos    = azimMotor.currentPosition() + 100000;
+  // Elevation.
+  uint8_t elevFound       = 1;
+//  uint8_t elevEnd         = 0;
+//  uint8_t prevElevEnd     = 0;
+//  uint32_t elevStartStep  = 0;
+//  uint32_t elevStopStep   = 0;
+//  uint32_t elevHomePos    = elevMotor.currentPosition() + 100000;
+  
+  uint32_t start      = 0;
+  
+  // Detect home locations (prevents parking if already parked).
+  rotator.isAzimHome  = Endstop_read(&azimSwitch);
+//  rotator.isElevHome  = Endstop_read(&elevSwitch);
+  rotator.isElevHome  = 1;
+  
+  // Indicate that the system is parking.
+  digitalWrite(RLED, HIGH);
+  
+  // Homing loop.
+  while (!rotator.isAzimHome || !rotator.isElevHome)
+  {
+    //======================================================================
+    // Azimuth loop.
+    azimEnd = Endstop_read(&azimSwitch);
+    
+    // Keep checking for the end-stop until it has been found.
+    if (!azimFound)
+    {
+      // Detect rising/falling edges of end-stop.
+      if (!prevAzimEnd && azimEnd)
+      {
+        // Record when the end-stop is first detected (rising edge).
+        azimStartStep = azimMotor.currentPosition();
+      }
+      else if (prevAzimEnd && !azimEnd)
+      {
+        // Record when the end-stop detection is lost (falling-edge).
+        azimStopStep = azimMotor.currentPosition();
+        // Calculate best estimate of end-stop center.
+        azimHomePos  = (azimStopStep + azimStartStep)/2;
+        // Record that the end has been found.
+        azimFound = 1;
+        // Start a timeout for homing (allow loop to converge).
+        if (elevFound)
+        {
+          // Start a timeout for homing (allow loop to converge).
+          start     = millis();
+        }
+      }
+    }
+
+    // Move to the desired position.
+    azimMotor.moveTo(azimHomePos);
+    azimMotor.run();
+    
+    // Store end-stop state.
+    prevAzimEnd = azimEnd;
+    
+    //======================================================================
+    // Elevation loop.
+//    elevEnd = Endstop_read(&elevSwitch);
+//    
+//    // Keep checking for the end-stop until it has been found.
+//    if (!elevFound)
+//    {
+//      // Detect rising/falling edges of end-stop.
+//      if (!prevElevEnd && elevEnd)
+//      {
+//        // Record when the end-stop is first detected (rising edge).
+//        elevStartStep = elevMotor.currentPosition();
+//      }
+//      else if (prevElevEnd && !elevEnd)
+//      {
+//        // Record when the end-stop detection is lost (falling-edge).
+//        elevStopStep = elevMotor.currentPosition();
+//        // Calculate best estimate of end-stop center.
+//        elevHomePos  = (elevStopStep + elevStartStep)/2;
+//        // Record that the end has been found.
+//        elevFound = 1;
+//        if (azimFound)
+//        {
+//          // Start a timeout for homing (allow loop to converge).
+//          start     = millis();
+//        }
+//      }
+//    }
+//
+//    // Move to the desired position.
+//    elevMotor.moveTo(elevHomePos);
+//    elevMotor.run();
+    
+    // After the home position is found, allow the
+    // homing loop to run until steady-state.
+    if (azimFound && elevFound)
+    {
+      // Check if timeout has been reached.
+      if ((millis()-start) > HOMING_DELAY)
+      {
+        // Break out of the homing loop.
+        rotator.isAzimHome = 1;
+        rotator.isElevHome = 1;
+      }
+    }
+
+  }
+  
+  // Check that the rotator is actually parked.
+  if (azimMotor.distanceToGo() != 0)
+  {
+    return -1;
+  }
+  // Check that the end-stop is enabled (should be parked at the end-stop).
+  if (!(azimEnd=Endstop_read(&azimSwitch)))
+  {
+    return -1;
+  }
+//  if (elevMotor.distanceToGo() != 0)
+//  {
+//    return -1;
+//  }
+//  if (!(elevEnd=Endstop_read(&elevSwitch)))
+//  {
+//    return -1;
+//  }
+
+  // Set the park positions.
+  azimMotor.setCurrentPosition(0);
+//  elevMotor.setCurrentPosition(0);
+  
+  // Signal that the rotator has parked.
+  digitalWrite(RLED, LOW);
+  
+  return 0;
+};
+
+int8_t
+Rotator_home(void *dev)
+{
+  uint8_t azHomed = 0;
+  uint8_t elHomed = 1;
+  uint32_t azStep = deg2step(rotator.azim);
+  uint32_t elStep = deg2step(rotator.elev);
+  
+  // Set location to move to.
+  azimMotor.moveTo(azStep);
+//  elevMotor.moveTo(elStep);
+  
+  while (!azHomed || !elHomed)
+  {
+    // Break out when the rotator has move to location.
+    if (azimMotor.distanceToGo() == 0)
+    {
+      azHomed = 1;
+      break;
+    }
+    
+    azimMotor.run();
+  }
+  
+  // Ensure the rotator is in position.
+  if (azimMotor.distanceToGo() != 0)
+  {
+    return -1;
+  }
+  if (elevMotor.distanceToGo() != 0)
+  {
+    return -1;
+  }
   
   return 0;
 };
