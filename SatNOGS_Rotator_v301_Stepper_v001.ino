@@ -21,8 +21,8 @@ Easycomm_Ctrl comms;
 // Rotator.
 // Stepper motors.
 #define GEAR_RATIO        (108/4)
-#define MAX_SPEED         (3200/2)
-#define MAX_ACCELERATION  (1600/2)
+#define MAX_SPEED         (3200/4)
+#define MAX_ACCELERATION  (1600/4)
 #define MIN_PULSE_WIDTH   (20)
 #define STEPS_PER_REV     (1600/4)
 #define HOMING_DELAY      (7500)
@@ -106,6 +106,7 @@ int8_t Rotator_setBreakIn(void *dev, uint32_t sec, uint8_t fwd);
 int8_t Rotator_setZero(void *dev);
 int8_t Rotator_setPark(void *dev);
 int8_t Rotator_getVersion(void *dev, const char **vers);
+int8_t Rotator_setSleep(void *dev);
 // Control functions.
 int8_t Rotator_park(void *dev);
 int8_t Rotator_home(void *dev);
@@ -201,6 +202,7 @@ setup()
   comms.setZero         = Rotator_setZero;
   comms.setPark         = Rotator_setPark;
   comms.getVersion      = Rotator_getVersion;
+  comms.setSleep        = Rotator_setSleep;
 
   // Initialize rotator steppers.
   // Azimuth.
@@ -264,6 +266,23 @@ loop()
   // packets. Flags should be checked after this function
   // to perform any requests.
   Easycomm_run(&comms);
+  
+  // Wake on move requests.
+  switch (rotator.state)
+  {
+    case EASYCOMM_STATUS_IDLE:
+      break;
+      
+    case EASYCOMM_STATUS_PARKING:
+    case EASYCOMM_STATUS_MOVING:
+    case EASYCOMM_STATUS_POINTING:
+      azimMotor.enableOutputs();
+      elevMotor.enableOutputs();
+      break;
+      
+    default:
+      break;
+  }
   
   // Process requests.
   switch (rotator.state)
@@ -673,7 +692,8 @@ Rotator_park(void *dev)
   // Signal that the rotator has parked.
   digitalWrite(RLED, LOW);
 
-  return 0;
+  // Sleep when parked.
+  return Rotator_setSleep(dev);
 };
 
 int8_t
@@ -713,8 +733,9 @@ Rotator_home(void *dev)
   {
     return -1;
   }
-
-  return 0;
+  
+  // Sleep when done moving.
+  return Rotator_setSleep(dev);
 };
 
 int8_t
@@ -744,6 +765,16 @@ const char **vers)
 {
   *vers = ROTATOR_VERSION;
 
+  return 0;
+};
+
+int8_t
+Rotator_setSleep(void *dev)
+{
+  // Sleep the motors to save power.
+  azimMotor.disableOutputs();
+  elevMotor.disableOutputs();
+  
   return 0;
 };
 
